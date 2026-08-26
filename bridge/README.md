@@ -12,16 +12,17 @@ endpoints on `127.0.0.1:8080`:
 
 ## Read-only by construction
 
-The bridge holds an **allow-list** of nine function modules and refuses anything
+The bridge holds an **allow-list** of ten function modules and refuses anything
 else with **HTTP 403** before it opens a connection to SAP:
 
 ```
 RFC_READ_TABLE  RFC_SYSTEM_INFO  TH_WPINFO  ENQUEUE_READ
 BAPI_XMI_LOGON  BAPI_XMI_LOGOFF
-BAPI_SYSTEM_MS_GETLIST  BAPI_SYSTEM_MON_GETTREE  BAPI_SYSTEM_MTE_GETPERFCURVAL
+BAPI_SYSTEM_MS_GETLIST  BAPI_SYSTEM_MON_GETTREE
+BAPI_SYSTEM_MTE_GETPERFCURVAL  BAPI_SYSTEM_MTE_GETMLHIS
 ```
 
-All nine read; none changes anything in SAP. The list can be overridden for
+All ten read; none changes anything in SAP. The list can be overridden for
 testing with the `JCO_ALLOWED_FUNCTIONS` environment variable (comma-separated),
 but the default is the nine above.
 

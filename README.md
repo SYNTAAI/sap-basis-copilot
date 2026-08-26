@@ -73,7 +73,7 @@ You need Python 3.11+, Java 17+, and the SAP Java Connector (JCo) 3.1 library.
 |------|-------|-----------------|
 | `get_system_health_summary` | SM51/SM37/SM21 | One-shot health check: instances up, active jobs, critical syslog |
 | `get_instance_status` | SM51 | Application server instances and their status |
-| `get_syslog_critical` | SM21 | Recent critical / error system-log entries (see note) |
+| `get_syslog_critical` | SM21 | Recent critical / error / warning system-log entries, from CCMS |
 | `check_update_errors` | SM13 | Failed update requests, top failing modules |
 | `get_work_process_status` | SM50/SM66 | Work processes across instances — active, waiting, stopped |
 | `get_response_time_analysis` | ST03N | Dialog / batch / RFC response-time statistics |
@@ -113,7 +113,7 @@ Every SAP object each tool touches, generated from the code:
 |------|-------|-------------|------------------|
 | `get_system_health_summary` | SM51/SM37/SM21 | TBTCO | RFC_SYSTEM_INFO |
 | `get_instance_status` | SM51 | — | RFC_SYSTEM_INFO |
-| `get_syslog_critical` | SM21 | — | RSLG_READ_SYSLOG_FOR_PERIOD |
+| `get_syslog_critical` | SM21 | — | BAPI_XMI_LOGON, BAPI_SYSTEM_MON_GETTREE, BAPI_SYSTEM_MTE_GETMLHIS |
 | `check_update_errors` | SM13 | VBHDR | — |
 | `get_work_process_status` | SM50/SM66 | — | TH_WPINFO |
 | `get_response_time_analysis` | ST03N | — | TH_WPINFO |
@@ -143,16 +143,17 @@ calls read-only function modules only.
 
 ## The read-only guarantee
 
-The bridge holds an allow-list of nine function modules and refuses anything else
+The bridge holds an allow-list of ten function modules and refuses anything else
 with **HTTP 403 before it opens a connection to SAP**:
 
 ```
 RFC_READ_TABLE  RFC_SYSTEM_INFO  TH_WPINFO  ENQUEUE_READ
 BAPI_XMI_LOGON  BAPI_XMI_LOGOFF
-BAPI_SYSTEM_MS_GETLIST  BAPI_SYSTEM_MON_GETTREE  BAPI_SYSTEM_MTE_GETPERFCURVAL
+BAPI_SYSTEM_MS_GETLIST  BAPI_SYSTEM_MON_GETTREE
+BAPI_SYSTEM_MTE_GETPERFCURVAL  BAPI_SYSTEM_MTE_GETMLHIS
 ```
 
-All nine read; `BAPI_XMI_LOGON`/`LOGOFF` only open and close the CCMS session the
+All ten read; `BAPI_XMI_LOGON`/`LOGOFF` only open and close the CCMS session the
 host-metrics reads need. There is no create, change, delete, lock, or transaction
 commit anywhere in the list. The list is enforced in the bridge, not merely in the
 Python client, so it holds regardless of what the MCP server asks for.
@@ -180,7 +181,6 @@ what the trace shows missing.
 - **No HANA system views.** It reads the ABAP/CCMS layer, not `M_*` HANA monitoring views. Native HANA diagnostics are a separate concern.
 - **No operating-system commands.** Host metrics come from CCMS/saposcol over RFC. There is no SSH, no shell, and no SM49/SM69 external commands.
 - **No execute, no change.** Every tool reads. Acting on what it finds — deleting a lock, cancelling a job, restarting a work process — is done by an administrator in SAP, not by this server.
-- **System log (SM21) not yet delivered.** No remote-enabled syslog reader is available on a standard system: the classic `RSLG_READ_SYSLOG_FOR_PERIOD` is not remote-callable, and the CCMS reader needs central-monitoring configuration. `get_syslog_critical` returns a clear "unavailable" note until a supported source is wired in.
 
 ## License
 

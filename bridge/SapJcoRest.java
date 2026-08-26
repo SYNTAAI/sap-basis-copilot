@@ -51,6 +51,7 @@ public class SapJcoRest {
         // --- CCMS host metrics (stateful XAL sequence, via /api/rfc/batch) ---
         "BAPI_XMI_LOGON", "BAPI_XMI_LOGOFF",
         "BAPI_SYSTEM_MS_GETLIST", "BAPI_SYSTEM_MON_GETTREE", "BAPI_SYSTEM_MTE_GETPERFCURVAL",
+        "BAPI_SYSTEM_MTE_GETMLHIS",
     };
 
     static final Set<String> ALLOWED_FUNCTIONS = buildAllowList();

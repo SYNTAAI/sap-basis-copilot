@@ -27,6 +27,7 @@ ALLOWED_RFC_FUNCTIONS = (
     "BAPI_SYSTEM_MS_GETLIST",         # CCMS monitor sets
     "BAPI_SYSTEM_MON_GETTREE",        # CCMS monitor tree
     "BAPI_SYSTEM_MTE_GETPERFCURVAL",  # CCMS current MTE value
+    "BAPI_SYSTEM_MTE_GETMLHIS",        # CCMS message-log history (SM21 syslog)
 )
 
 

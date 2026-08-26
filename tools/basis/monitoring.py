@@ -49,73 +49,138 @@ def register_monitoring_tools(mcp, connector):
             logger.warning("RFC %s call failed: %s", function, exc)
             return {}, True
 
+    async def _syslog_severity_counts(hours_back=1):
+        """Return (by_severity_dict, None) or ({}, reason) — never raises.
+
+        Reads the R3Syslog message log through CCMS (GETTREE + GETMLHIS) and counts
+        by severity. Used by the health summary so a syslog failure is reported as
+        unavailable rather than silently counted as zero.
+        """
+        if not hasattr(connector, "_rfc_batch"):
+            return {}, "batch RFC bridge unavailable"
+        try:
+            logon = {"function": "BAPI_XMI_LOGON",
+                     "params": {"EXTCOMPANY": "SyntaAI", "EXTPRODUCT": "MCP",
+                                "INTERFACE": "XAL", "VERSION": "1.0"}}
+            tid_fields = ("MTSYSID", "MTMCNAME", "MTNUMRANGE", "MTUID",
+                          "MTCLASS", "MTINDEX", "EXTINDEX")
+            tree = await connector._rfc_batch([logon, {
+                "function": "BAPI_SYSTEM_MON_GETTREE",
+                "params": {"EXTERNAL_USER_NAME": "SYNTAAI_MCP",
+                           "MONITOR_NAME": {"MS_NAME": "SAP CCMS Monitor Templates",
+                                            "MONI_NAME": "Entire System"}}}])
+            if not tree.get("success") or len(tree.get("results", [])) < 2:
+                return {}, "CCMS tree unavailable: " + str(tree.get("error") or "no data")
+            nodes = tree["results"][1].get("tables", {}).get("TREE_NODES", [])
+            areas = [n for n in nodes
+                     if str(n.get("OBJECTNAME", "")).strip().lower() == "r3syslog"
+                     and str(n.get("MTCLASS", "")).strip() == "101"]
+            if not areas:
+                return {}, "no R3Syslog nodes in CCMS tree"
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            now = _dt.now(_tz.utc)
+            start = now - _td(hours=max(int(hours_back), 1))
+            fmt = lambda d: d.strftime("%Y%m%d%H%M%S")
+            calls = [logon]
+            for a in areas:
+                calls.append({"function": "BAPI_SYSTEM_MTE_GETMLHIS",
+                              "params": {"EXTERNAL_USER_NAME": "SYNTAAI_MCP",
+                                         "TID": {f: a.get(f, "") for f in tid_fields},
+                                         "START_TIMESTAMP": fmt(start),
+                                         "END_TIMESTAMP": fmt(now)}})
+            hist = await connector._rfc_batch(calls)
+            if not hist.get("success"):
+                return {}, "CCMS message-log read failed: " + str(hist.get("error"))
+            from collections import Counter as _C
+            sev = _C()
+            for res in hist["results"][1:]:
+                if not isinstance(res, dict):
+                    continue
+                for ln in res.get("tables", {}).get("MSG_LINE_DATA", []):
+                    v = str(ln.get("VALUEFLTRD", ln.get("VALUEORIG", ""))).strip()
+                    sev[{"1": "info", "2": "warning", "3": "error"}.get(v, "info")] += 1
+            return dict(sev), None
+        except Exception as e:
+            return {}, str(e)
+
     # ------------------------------------------------------------------
     # 1. get_system_health_summary
     # ------------------------------------------------------------------
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
     async def get_system_health_summary() -> dict:
-        """One-shot SAP health check combining instance status (SM51), active jobs (SM37), and critical syslog (SM21)."""
-        try:
-            # Fetch data sources in parallel
-            sysinfo_task = _safe_rfc_call("RFC_SYSTEM_INFO")
-            jobs_task = _safe_table_read(
-                "TBTCO",
-                ["JOBNAME", "STATUS", "SDLSTRTDT", "AUTHCKNAM"],
-                "STATUS = 'R'",
-                20,
-            )
+        """One-shot SAP health check combining instance status (SM51), active jobs (SM37), and critical syslog (SM21).
 
-            (sysinfo, sysinfo_err), (active_jobs, _jobs_err) = await asyncio.gather(
-                sysinfo_task, jobs_task
-            )
+        Each component is reported independently. If a component's underlying call
+        fails, that component is returned as {"status": "unavailable", "reason": ...}
+        and the overall health is UNKNOWN -- a failed call is never counted as zero,
+        because "no data" and "nothing wrong" are different answers.
+        """
+        components = {}
+        any_unavailable = False
 
-            # Derive instance info from RFC_SYSTEM_INFO
-            # Response format: {"export": {"FQHN": "...", "CURRENT_RESOURCES": "...", ...}, "tables": {}}
-            instances = []
-            inst_err = sysinfo_err
-            if not sysinfo_err:
-                export = sysinfo.get("export", sysinfo)
-                instances = [{
-                    "hostname": export.get("FQHN", export.get("RFCHOST", "")),
-                    "system_id": export.get("RFCSYSID", ""),
-                    "database": export.get("RFCDBHOST", ""),
-                    "kernel_release": export.get("RFCKERNRL", ""),
-                    "s4_hana": export.get("S4_HANA", ""),
-                    "status": "ACTIVE",
-                }]
-
-            instances_up = len(instances)
-            total_instances = len(instances)
-
-            # Syslog is not available via table read; skip gracefully
-            critical_logs = []
-            syslog_err = True
-
-            if total_instances > 0 and instances_up < total_instances:
-                health_score = "CRITICAL"
-            elif critical_logs:
-                health_score = "WARNING"
-            else:
-                health_score = "OK"
-
-            return {
-                "source": "live_sap",
-                "health_score": health_score,
-                "summary": {
-                    "total_instances": total_instances,
-                    "instances_up": instances_up,
-                    "active_jobs_running": len(active_jobs),
-                    "critical_log_entries": len(critical_logs),
-                },
-                "instances": instances,
-                "active_jobs": active_jobs,
-                "critical_logs": critical_logs,
-                "syslog_unavailable": syslog_err,
-                "syslog_note": "SM21 syslog is not available via table read. Use get_syslog_critical for RFC-based access.",
-                "checked_at": datetime.utcnow().isoformat() + "Z",
+        # --- instances (RFC_SYSTEM_INFO) ---
+        sysinfo, sysinfo_err = await _safe_rfc_call("RFC_SYSTEM_INFO")
+        if sysinfo_err:
+            components["instances"] = {"status": "unavailable",
+                                       "reason": "RFC_SYSTEM_INFO call failed"}
+            any_unavailable = True
+        else:
+            ex = sysinfo.get("export", sysinfo)
+            components["instances"] = {
+                "status": "available",
+                "total": 1, "up": 1,
+                "system_id": ex.get("RFCSYSID", ""),
+                "host": ex.get("RFCHOST", ""),
+                "kernel_release": ex.get("RFCKERNRL", ""),
             }
-        except Exception as e:
-            return {"source": "live_sap", "error": str(e), "tool": "get_system_health_summary"}
+
+        # --- background jobs (TBTCO) ---
+        job_rows, jobs_err = await _safe_table_read(
+            "TBTCO", ["JOBNAME", "STATUS"], "", 500)
+        if jobs_err:
+            components["jobs"] = {"status": "unavailable",
+                                  "reason": "TBTCO read failed"}
+            any_unavailable = True
+        else:
+            from collections import Counter as _C
+            labels = {"R": "active", "F": "finished", "A": "cancelled",
+                      "S": "released", "Y": "ready", "P": "scheduled"}
+            c = _C(labels.get(r.get("STATUS", ""), "other") for r in job_rows)
+            components["jobs"] = {"status": "available",
+                                  "active": c.get("active", 0),
+                                  "cancelled": c.get("cancelled", 0),
+                                  "by_status": dict(c)}
+
+        # --- critical syslog (CCMS R3Syslog message log) ---
+        sev, syslog_err = await _syslog_severity_counts(hours_back=1)
+        if syslog_err:
+            components["syslog"] = {"status": "unavailable", "reason": syslog_err}
+            any_unavailable = True
+        else:
+            components["syslog"] = {"status": "available",
+                                    "errors": sev.get("error", 0),
+                                    "warnings": sev.get("warning", 0),
+                                    "window_hours": 1}
+
+        # --- overall health ---
+        if any_unavailable:
+            health = "UNKNOWN"
+        else:
+            inst = components["instances"]
+            syslog_errors = components["syslog"].get("errors", 0)
+            if inst.get("up", 0) < inst.get("total", 0):
+                health = "CRITICAL"
+            elif syslog_errors > 0 or components["jobs"].get("cancelled", 0) > 0:
+                health = "WARNING"
+            else:
+                health = "OK"
+
+        return {
+            "source": "live_sap",
+            "health": health,
+            "components": components,
+            "checked_at": datetime.utcnow().isoformat() + "Z",
+        }
 
     # ------------------------------------------------------------------
     # 2. get_instance_status
@@ -201,82 +266,121 @@ def register_monitoring_tools(mcp, connector):
         hours_back: int = 24,
         max_entries: int = 50,
         severity_filter: str = "all",
+        external_user_name: str = "SYNTAAI_MCP",
     ) -> dict:
-        """Recent critical/error entries from the SAP system log (SM21). Supports filtering by severity and time window."""
+        """Recent critical/error entries from the SAP system log (SM21), read from CCMS.
+
+        The classic RFC RSLG_READ_SYSLOG_FOR_PERIOD is not remote-enabled on modern
+        systems, so this reads the R3Syslog message log through the CCMS monitoring
+        architecture: BAPI_SYSTEM_MON_GETTREE locates the per-area syslog nodes and
+        BAPI_SYSTEM_MTE_GETMLHIS returns their message history with timestamp,
+        severity and rendered text. Requires a stateful XMI session (batch RFC).
+
+        Args:
+            hours_back: time window, 1..168 hours (default 24).
+            max_entries: cap on returned detail entries, 1..200 (default 50).
+            severity_filter: all | error | warning | info.
+            external_user_name: name registered with the CCMS XAL interface.
+        """
         try:
-            hours_back = min(max(hours_back, 1), 168)
-            max_entries = min(max(max_entries, 1), 200)
+            hours_back = min(max(int(hours_back), 1), 168)
+            max_entries = min(max(int(max_entries), 1), 200)
+            if not hasattr(connector, "_rfc_batch"):
+                return {"source": "live_sap", "error": "CCMS syslog needs the batch RFC bridge.",
+                        "tool": "get_syslog_critical"}
 
-            cutoff = datetime.utcnow() - timedelta(hours=hours_back)
-            date_from = cutoff.strftime("%Y%m%d")
-            time_from = cutoff.strftime("%H%M%S")
-            date_to = datetime.utcnow().strftime("%Y%m%d")
-            time_to = datetime.utcnow().strftime("%H%M%S")
+            logon = {"function": "BAPI_XMI_LOGON",
+                     "params": {"EXTCOMPANY": "SyntaAI", "EXTPRODUCT": "MCP",
+                                "INTERFACE": "XAL", "VERSION": "1.0"}}
+            tid_fields = ("MTSYSID", "MTMCNAME", "MTNUMRANGE", "MTUID",
+                          "MTCLASS", "MTINDEX", "EXTINDEX")
 
-            # Try RFC RSLG_READ_SYSLOG_FOR_PERIOD
-            rfc_result, rfc_failed = await _safe_rfc_call(
-                "RSLG_READ_SYSLOG_FOR_PERIOD",
-                {
-                    "DATE_FROM": date_from,
-                    "TIME_FROM": time_from,
-                    "DATE_TO": date_to,
-                    "TIME_TO": time_to,
-                },
-            )
+            # 1. locate the R3Syslog message-log MTEs (MTCLASS 101) per area.
+            tree = await connector._rfc_batch([logon, {
+                "function": "BAPI_SYSTEM_MON_GETTREE",
+                "params": {"EXTERNAL_USER_NAME": external_user_name,
+                           "MONITOR_NAME": {"MS_NAME": "SAP CCMS Monitor Templates",
+                                            "MONI_NAME": "Entire System"}}}])
+            if not tree.get("success") or len(tree.get("results", [])) < 2:
+                return {"source": "live_sap", "total_entries": 0, "by_severity": {}, "entries": [],
+                        "note": "CCMS monitor tree unavailable: " + str(tree.get("error") or "no data"),
+                        "hours_back": hours_back}
+            nodes = tree["results"][1].get("tables", {}).get("TREE_NODES", [])
+            areas = [n for n in nodes
+                     if str(n.get("OBJECTNAME", "")).strip().lower() == "r3syslog"
+                     and str(n.get("MTCLASS", "")).strip() == "101"]
+            if not areas:
+                return {"source": "live_sap", "total_entries": 0, "by_severity": {}, "entries": [],
+                        "note": "No R3Syslog message-log nodes found in the CCMS tree.",
+                        "hours_back": hours_back}
 
-            if rfc_failed:
-                return {
-                    "source": "live_sap",
-                    "hours_back": hours_back,
-                    "severity_filter": severity_filter,
-                    "total_entries": 0,
-                    "by_severity": {},
-                    "entries": [],
-                    "note": "SM21 syslog data is not available. The SYSLOG table does not exist "
-                            "for direct reads, and RFC RSLG_READ_SYSLOG_FOR_PERIOD could not be called. "
-                            "This may require additional authorizations or the function module may not be available.",
-                }
+            from datetime import datetime, timedelta, timezone
+            now = datetime.now(timezone.utc)
+            start = now - timedelta(hours=hours_back)
+            ts = lambda dt: dt.strftime("%Y%m%d%H%M%S")
 
-            # Parse RFC result – the syslog entries are typically in a table parameter
-            raw_entries = rfc_result.get("ES_SYSLOG", rfc_result.get("ET_SYSLOG", []))
-            if isinstance(raw_entries, dict):
-                raw_entries = [raw_entries]
+            # 2. one stateful batch: logon, then GETMLHIS for every area.
+            calls = [logon]
+            for a in areas:
+                calls.append({"function": "BAPI_SYSTEM_MTE_GETMLHIS",
+                              "params": {"EXTERNAL_USER_NAME": external_user_name,
+                                         "TID": {f: a.get(f, "") for f in tid_fields},
+                                         "START_TIMESTAMP": ts(start), "END_TIMESTAMP": ts(now)}})
+            hist = await connector._rfc_batch(calls)
+            if not hist.get("success"):
+                return {"source": "live_sap", "total_entries": 0, "by_severity": {}, "entries": [],
+                        "note": "CCMS message-log read failed: " + str(hist.get("error")),
+                        "hours_back": hours_back}
 
-            severity_map_filter = {
-                "error": "E",
-                "abort": "A",
-                "warning": "W",
-            }
-            filter_sev = severity_map_filter.get(severity_filter)
+            def value_label(v):
+                return {"1": "info", "2": "warning", "3": "error"}.get(str(v).strip(), "info")
 
-            severity_counts: Counter = Counter()
+            want = {"error": {"error"}, "warning": {"warning"},
+                    "info": {"info"}}.get(severity_filter.lower())
+
+            from collections import Counter
+            by_sev = Counter()
+            by_area = Counter()
             entries = []
-            for row in raw_entries:
-                sev = row.get("SEVERITY", row.get("SEV", ""))
-                if filter_sev and sev != filter_sev:
+            for a, res in zip(areas, hist["results"][1:]):
+                if not isinstance(res, dict):
                     continue
-                if sev in ("E", "A", "W"):
-                    severity_counts[sev] += 1
-                else:
-                    severity_counts["other"] += 1
-                entries.append({
-                    "date": row.get("DATE", row.get("DATUM", "")),
-                    "time": row.get("TIME", row.get("UZEIT", "")),
-                    "severity": sev,
-                    "text": row.get("TEXT", row.get("MTEXT", "")),
-                    "host": row.get("HOST", row.get("SERVER", "")),
-                    "client": row.get("MANDT", row.get("MANDANT", "")),
-                })
-                if len(entries) >= max_entries:
-                    break
+                lines = res.get("tables", {}).get("MSG_LINE_DATA", [])
+                raw = res.get("tables", {}).get("XMI_MSG_RAW", [])
+                ext = res.get("tables", {}).get("XMI_MSG_EXT", [])
+                area = str(a.get("MTNAMESHRT", "")).strip()
+                for i, ln in enumerate(lines):
+                    label = value_label(ln.get("VALUEFLTRD", ln.get("VALUEORIG")))
+                    by_sev[label] += 1
+                    by_area[area] += 1
+                    if want and label not in want:
+                        continue
+                    msg_id = raw[i].get("MSGID", "") if i < len(raw) else ""
+                    text = ext[i].get("MSG", "") if i < len(ext) else ""
+                    entries.append({
+                        "date": ln.get("MSCDATE", ""),
+                        "time": ln.get("MSCTIME", ""),
+                        "area": area,
+                        "severity": label,
+                        "severity_value": str(ln.get("SEVERORIG", "")).strip(),
+                        "message_id": str(msg_id).strip(),
+                        "text": str(text).strip()[:160],
+                        "user": str(ln.get("USERID", "")).strip(),
+                    })
+            entries.sort(key=lambda e: (e["date"], e["time"]), reverse=True)
+            total_matched = len(entries)
 
             return {
                 "source": "live_sap",
                 "hours_back": hours_back,
                 "severity_filter": severity_filter,
-                "total_entries": len(entries),
-                "by_severity": dict(severity_counts),
-                "entries": entries,
+                "total_entries": sum(by_sev.values()),
+                "matched_entries": total_matched,
+                "by_severity": dict(by_sev),
+                "by_area": dict(by_area.most_common(10)),
+                "entries": entries[:max_entries],
+                "collector": "CCMS R3Syslog via BAPI_SYSTEM_MTE_GETMLHIS",
+                "checked_at": now.isoformat(),
             }
         except Exception as e:
             return {"source": "live_sap", "error": str(e), "tool": "get_syslog_critical"}
