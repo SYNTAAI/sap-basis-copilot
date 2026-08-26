@@ -41,12 +41,23 @@ _INSTRUCTIONS = (
     "Say plainly when a check returned no data rather than implying it passed."
 )
 
+# The public hostname (from SYNTAAI_ISSUER_URL) must be allowed, or the MCP SDK's
+# DNS-rebinding protection rejects proxied requests with 421 Misdirected Request.
+from urllib.parse import urlparse as _urlparse
+
+_issuer_host = (_urlparse(settings.issuer_url).hostname or "").strip()
+_public_hosts, _public_origins = [], []
+if _issuer_host and _issuer_host not in ("127.0.0.1", "localhost"):
+    _public_hosts = [_issuer_host, f"{_issuer_host}:*"]
+    _public_origins = [f"https://{_issuer_host}", f"https://{_issuer_host}:*"]
+
 _TRANSPORT_SECURITY = TransportSecuritySettings(
-    allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", *_public_hosts],
     allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*",
                      "https://claude.ai", "https://www.claude.ai",
                      "https://claude.com", "https://www.claude.com",
-                     "https://api.anthropic.com"],
+                     "https://api.anthropic.com", *_public_origins],
 )
 
 if settings.auth_disabled:
