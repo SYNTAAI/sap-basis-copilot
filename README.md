@@ -73,7 +73,7 @@ You need Python 3.11+, Java 17+, and the SAP Java Connector (JCo) 3.1 library.
 |------|-------|-----------------|
 | `get_system_health_summary` | SM51/SM37/SM21 | One-shot health check: instances up, active jobs, critical syslog |
 | `get_instance_status` | SM51 | Application server instances and their status |
-| `get_syslog_critical` | SM21 | Recent critical / error / warning system-log entries, from CCMS |
+| `get_syslog_critical` | SM21 | Recent critical / error / warning system-log entries, from the CCMS R3Syslog collector (not raw syslog files; coverage follows CCMS retention, Security category may be sparse) |
 | `check_update_errors` | SM13 | Failed update requests, top failing modules |
 | `get_work_process_status` | SM50/SM66 | Work processes across instances — active, waiting, stopped |
 | `get_response_time_analysis` | ST03N | Dialog / batch / RFC response-time statistics |

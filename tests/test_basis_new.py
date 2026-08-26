@@ -1,4 +1,4 @@
-"""Live smoke tests for the five new Basis tools (SM12, SM58, SMQ1/2, SP01, ST06).
+"""Integration tests for the five new Basis tools (require a live SAP system) (SM12, SM58, SMQ1/2, SP01, ST06).
 
 Runs against the SAP system configured in .env, exactly as server.py does:
 Settings() -> ConnectorFactory.create(). Read-only throughout.
@@ -62,6 +62,13 @@ CASES = [
 
 
 async def main():
+    # Integration test: requires a live SAP system reachable via the JCo bridge.
+    # Skipped (exit 0) when SAP_ASHOST is unset, so CI on the public repo -- which
+    # has no SAP system -- does not fail. The stdio smoke test is the pure unit test.
+    if not (os.getenv("SAP_ASHOST") or os.getenv("SAP_HOST")):
+        print("SKIP: integration test needs a live SAP system (set SAP_ASHOST). "
+              "Run tests/test_stdio_smoke.py for the no-SAP unit check.")
+        return 0
     settings = Settings()
     connector = ConnectorFactory.create(settings)
 

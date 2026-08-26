@@ -380,6 +380,7 @@ def register_monitoring_tools(mcp, connector):
                 "by_area": dict(by_area.most_common(10)),
                 "entries": entries[:max_entries],
                 "collector": "CCMS R3Syslog via BAPI_SYSTEM_MTE_GETMLHIS",
+                "limitations": "reads the CCMS syslog collector (R3Syslog MTEs), not the raw syslog files; coverage depends on CCMS retention and which categories the collector holds, and the Security category may be sparse.",
                 "checked_at": now.isoformat(),
             }
         except Exception as e:
