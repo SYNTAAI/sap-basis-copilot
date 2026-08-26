@@ -110,6 +110,13 @@ def main() -> None:
 
     app.routes.insert(0, Route("/health", health_handler, methods=["GET"]))
 
+    # OAuth login page (hosted mode only). The provider redirects the browser to
+    # /syntaai-login?session=...; without this route that URL 404s.
+    if not settings.auth_disabled:
+        from oauth_provider import login_page_handler
+        app.routes.insert(0, Route("/syntaai-login", login_page_handler, methods=["GET", "POST"]))
+        app.state.oauth_provider = oauth_provider
+
     logger.info("SAP Basis Copilot on http://%s:%s/mcp — %d read-only tools, OAuth %s",
                 settings.mcp_host, settings.mcp_port, count,
                 "disabled" if settings.auth_disabled else "enabled")
