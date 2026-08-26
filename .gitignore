@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+
+# SAP JCo — proprietary, download from the SAP Support Portal (see bridge/README.md)
+bridge/sapjco3.jar
+bridge/libsapjco3.so
+bridge/*.dll
+bridge/*.so
+*.jar
+
+# Java build output
+bridge/*.class
+bridge/build/
+
+# Local data / logs
+data/
+logs/
+*.log
+*.jsonl
